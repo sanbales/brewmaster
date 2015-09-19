@@ -1,5 +1,5 @@
 # brewmaster
-A model-based framework to assist breweries in optimizing their processes
+A model-based framework to assist breweries in optimizing their processes.
 
 # Install
 You can pip install the package using this command:
