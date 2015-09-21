@@ -176,18 +176,18 @@ class Brewery(SimpyMixin):
                 self.patrons = []
 
     def take_order(self, beers, pints):
+        revenue = 0
         if hasattr(beers, '__iter__'):
             if isinstance(pints, (int, float)):
                 for beer in beers:
-                    if beer:
-                        yield self.register.put(self.sell(beer, pints))
+                    revenue += self.sell(beer, pints)
             else:
                 for beer, pints_of_beer in zip(beers, pints):
-                    if beer:
-                        yield self.register.put(self.sell(beer, pints_of_beer))
+                    revenue += self.sell(beer, pints_of_beer)
         else:
-            if beers:
-                yield self.register(self.sell(beers, pints))
+            revenue = self.sell(beers, pints)
+
+        yield self.register.put(revenue)
 
     def find_keg(self, beer, location='bar', any_beer=False):
         if location == 'bar':
@@ -218,8 +218,11 @@ class Brewery(SimpyMixin):
             poured = keg.contents.level
         else:
             poured = pints
+
         if poured:
             keg.contents.get(poured)
+        else:
+            return poured
 
         if poured < pints:
             self.swap_keg(keg)
