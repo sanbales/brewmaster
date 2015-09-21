@@ -39,8 +39,8 @@ class Patron(SimpyMixin):
 
                 self.brewery.log(self.name + ' waiting to order')
                 yield self.wait(TIME_TO_ORDER)
-                beers = [1]
-                while self.now < self.departure and sum(beers):
+                beers = True
+                while self.now < self.departure and beers:
                     beers = self.select_beers()
                     if beers:
                         yield self.process(self.brewery.take_order(beers, 1))
@@ -76,6 +76,6 @@ class Patron(SimpyMixin):
                 else:
                     self.brewery.log('A customer in {} could not get {} nor any other beer'.format(self.name, beer))
             else:
-                beers.append(new_beer)
+                beers.append(beer)
 
         return beers

@@ -218,8 +218,8 @@ class Brewery(SimpyMixin):
             poured = keg.contents.level
         else:
             poured = pints
-
-        keg.contents.get(poured)
+        if poured:
+            keg.contents.get(poured)
 
         if poured < pints:
             self.swap_keg(keg)
