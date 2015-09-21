@@ -22,8 +22,8 @@ class Patron(SimpyMixin):
         self.departure = self.now + expovariate(AVG_GROUP_STAY)
         self.party_size = poisson(AVG_GROUP_SIZE - 1) + 1
         self.max_wait = uniform(*MAX_WAIT) if max_wait is None else max_wait
-        self.order = [poisson(AVG_NUM_DRINKS) for _ in range(self.party_size)]
-        self.name = "Party of {} (arrived at {:10.1f})".format(self.party_size, self.now)
+        self.max_orders = [poisson(AVG_NUM_DRINKS) for _ in range(self.party_size)]
+        self.name = "Party of {} (arrived at {:.1f})".format(self.party_size, self.now)
         self.consuming = self.process(self.consume())
 
     def consume(self):
@@ -34,18 +34,19 @@ class Patron(SimpyMixin):
             with self.brewery.tables[table_size].request() as table:
                 request = yield table | self.wait(self.max_wait)
                 if table not in request:
-                    raise Interrupt("Tired of waiting")
+                    raise Interrupt("they are tired of waiting")
                     self.brewery.tables[table_size].release(table)
 
                 self.brewery.log(self.name + ' waiting to order')
                 yield self.wait(TIME_TO_ORDER)
-                while self.now < self.departure:
+                beers = [1]
+                while self.now < self.departure and sum(beers):
                     beers = self.select_beers()
                     if beers:
-                        self.brewery.take_order(beers, 1)
-
+                        yield self.process(self.brewery.take_order(beers, 1))
                         self.brewery.log(self.name + ' waiting to be served')
                         yield self.wait(TIME_TO_BE_SERVED)
+                        self.brewery.log(self.name + ' is drinking')
                         yield self.wait(TIME_TO_REORDER)
                 self.brewery.log(self.name + ' waiting to pay')
                 yield self.wait(TIME_TO_PAY)
@@ -59,21 +60,22 @@ class Patron(SimpyMixin):
         tapped_kegs = {keg.name: keg for keg in self.brewery.tapped_kegs.items}
 
         for customer in range(self.party_size):
-            if self.order[customer] > 0:
-                self.order[customer] -= 1
+            if self.max_orders[customer] > 0:
+                self.max_orders[customer] -= 1
             else:
                 continue
-            other_beer = None
-            beer = sample(self.brewery.beers, 1)[0]
+            new_beer = None
+            beer = sample(tapped_kegs, 1)[0]
+            self.brewery.log('A customer in {} wants to drink a pint of {}'.format(self.name, beer))
             if beer not in tapped_kegs or tapped_kegs[beer].amount < KEGS_PER_PINT:
                 candidate_kegs = [key for key, keg in tapped_kegs.items() if keg.amount > KEGS_PER_PINT]
                 if candidate_kegs:
                     new_beer = sample(candidate_kegs, 1)[0]
                     self.brewery.log('A customer in {} could not get {} so they ordered {}'.format(self.name, beer, new_beer))
-                    beer.append(other_beer)
+                    beers.append(new_beer)
                 else:
                     self.brewery.log('A customer in {} could not get {} nor any other beer'.format(self.name, beer))
             else:
-                beers.append(other_beer)
+                beers.append(new_beer)
 
         return beers

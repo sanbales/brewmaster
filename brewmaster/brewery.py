@@ -1,6 +1,6 @@
 from __future__ import division, print_function
 from json import load
-from random import expovariate, normalvariate, sample, uniform
+from random import seed, expovariate, normalvariate, sample, uniform
 import simpy
 from util import SimpyMixin, poisson, csv_to_dict, json_to_dict, check_inputs
 from patron import Patron
@@ -37,9 +37,13 @@ class Brewery(SimpyMixin):
                  batch_size=2,
                  num_kegs_per_beer=2,
                  tables=None,
-                 hours=None, *args, **kwargs):
+                 hours=None,
+                 random_seed=None, *args, **kwargs):
 
         super(Brewery, self).__init__(*args, **kwargs)
+
+        if random_seed is not None:
+            seed(random_seed)
 
         self.register = self.new_container(init=initial_funds)
         self.beers = {name: beer for name, beer in json_to_dict(beers_list).items()}
@@ -123,7 +127,7 @@ class Brewery(SimpyMixin):
                 yield self.wait(time_till_close)
                 self.serving.interrupt("Brewery is closing")
                 self.log("Brewery is closing for {}".format(DAYS[day_of_the_week]))
-                self.process(self.set_tables())
+                self.set_tables()
                 self.process(self.check_kegs())
                 yield self.wait(24 - (self.now % 24.0))
             else:
@@ -164,27 +168,33 @@ class Brewery(SimpyMixin):
             except simpy.Interrupt:
                 self.log("Kicking out {} patrons".format(sum([patron.party_size for patron in self.patrons])))
                 for patron in self.patrons:
-                    patron.consuming.interrupt()
+                    try:
+                        patron.consuming.interrupt()
+                    except:
+                        pass
                     del patron
                 self.patrons = []
 
     def take_order(self, beers, pints):
-        if hasattr(beers, __iter__):
+        if hasattr(beers, '__iter__'):
             if isinstance(pints, (int, float)):
                 for beer in beers:
-                    yield self.register.put(self.sell(beer, pints))
+                    if beer:
+                        yield self.register.put(self.sell(beer, pints))
             else:
                 for beer, pints_of_beer in zip(beers, pints):
-                    yield self.register.put(self.sell(beer, pints_of_beer))
+                    if beer:
+                        yield self.register.put(self.sell(beer, pints_of_beer))
         else:
-            yield self.register(self.sell(beer, pints))
+            if beers:
+                yield self.register(self.sell(beers, pints))
 
     def find_keg(self, beer, location='bar', any_beer=False):
         if location == 'bar':
             storage = self.tapped_kegs.items
         elif location == 'cellar':
             storage = self.cellar.items
-        kegs = sorted([keg for keg in storage if keg.name == beer], key=lambda x: x.level)
+        kegs = sorted([keg for keg in storage if keg.name == beer], key=lambda x: x.amount)
         if kegs:
             return kegs[0]
         return None
@@ -209,18 +219,20 @@ class Brewery(SimpyMixin):
         else:
             poured = pints
 
-        yield keg.get(poured)
+        keg.contents.get(poured)
 
         if poured < pints:
             self.swap_keg(keg)
             poured += self.pour(beer, pints - poured)
             if poured < pints:
                 self.log('Failed to sell {} pints of {}'.format(pints - poured, beer))
-        yield poured
+        return poured
 
     def sell(self, beer, pints):
-        poured = self.pour(beer, pints)
-        return poured * self.prices[beer]
+        if beer:
+            poured = self.pour(beer, pints)
+            return poured * self.prices[beer]
+        return 0.0
 
     def inventory(self, beer):
         return sum(keg.amount for keg in self.cellar.items if keg.name == beer) + \
