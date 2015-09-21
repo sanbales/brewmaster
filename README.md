@@ -15,3 +15,12 @@ pip install git+git://github.com/sanbales/brewmaster.git#<version>
 ```
 
 where <version> is the semantic version, e.g., 0.0.1
+
+# Usage
+You can run the model by simply typing:
+
+```
+from brewmaster.brewery import Brewery
+brewery = Brewery()  # Make a brewery with default parameters
+brewery.run()        # Run the simulation for a year
+```
