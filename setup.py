@@ -23,9 +23,12 @@ setup(name='brewmaster',
                    'License :: OSI Approved :: MIT License',
                    'Natural Language :: English',
                    'Framework :: IPython',
+                   'Intended Audience :: Other Audience',
                    'Operating System :: MacOS :: MacOS X',
                    'Operating System :: POSIX :: Linux',
                    'Operating System :: Microsoft :: Windows',
                    'Programming Language :: Python :: 2.7',
+                   'Programming Language :: Python :: 3.4',
+                   'Topic :: Office/Business'
                    ],
       py_modules=['brewmaster'])

@@ -1,8 +1,10 @@
 from __future__ import division, print_function
 from json import load
-from random import expovariate, normalvariate, sample
+from random import expovariate, normalvariate, sample, uniform
 import simpy
-from util import SimpyMixin, poisson, csv_to_dict, json_to_dict
+from util import SimpyMixin, poisson, csv_to_dict, json_to_dict, check_inputs
+from patron import Patron
+from keg import Keg
 
 
 DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -13,87 +15,12 @@ DEFAULT_HOURS = {'Monday': [10, 22],
                  'Friday': [10, 24],
                  'Saturday': [9, 24],
                  'Sunday': [12, 20]}
+MAX_START_WAIT = 2
 MAX_MASH_WAIT = 6
 AVG_GROUP_ARRIVAL_TIME = 0.5
-AVG_GROUP_SIZE = 4
-AVG_GROUP_STAY = 1.5
-AVG_NUM_DRINKS = 1.2
-KEGS_PER_PINT = 1 / 124
-GALLONS_PER_KEG = 15.5
+TIME_TO_KEG = 0.5
 TIME_TO_DELIVER = [5, 48]
 MAX_AMOUNT_PER_INGREDIENT = 100
-
-
-def check_inputs(beers, prices):
-    for beer, data in beers.items():
-        if beer not in prices:
-            raise KeyError('Beer {} is not listed in prices'.format(beer))
-        for ingredient in data['ingredients']:
-            if ingredient not in prices:
-                raise KeyError('Ingredient {} for beer {} is not listed in prices'.format(ingredient, beer))
-
-
-class Keg(SimpyMixin):
-    def __init__(self, name=None, expiration=0, init=0, *args, **kwargs):
-        super(Keg, self).__init__(*args, **kwargs)
-        expiration = 24 * expiration
-        self.expiration = self.now + expiration if expiration < self.now else expiration
-        self.name = name
-        self.contents = self.new_container(capacity=124, init=init)
-        self.clean = True
-
-        amount = self.contents.level
-        get = self.contents.get
-
-    def fill(self, beer, amount=None):
-        if amount is None:
-            amount = self.contents.capacity
-        if amount > self.contents.capacity:
-            raise ValueError("Keg has capacity of {}, cannot fill it with {} pints of beer".format(self.contents.capacity, amount))
-        self.name = beer
-        self.clean = False
-        self.contents.put(amount)
-
-
-class Patron(SimpyMixin):
-    def __init__(self, brewery, *args, **kwargs):
-        super(Patron, self).__init__(*args, **kwargs)
-        self.brewery = brewery
-        self.departure = self.now + expovariate(AVG_GROUP_STAY)
-        self.party_size = poisson(AVG_GROUP_SIZE - 1) + 1
-        self.order = [poisson(AVG_NUM_DRINKS) for _ in range(self.party_size)]
-        self.name = "Party of {} arrived at {:10}".format(self.party_size, self.now)
-        self.consuming = self.process(self.consume())
-
-    def consume(self):
-        try:
-            self.log(self.name + ' arrived')
-            yield self.wait(TIME_TO_BE_SEATED)
-            self.log(self.name + ' waiting to order')
-            yield self.wait(TIME_TO_ORDER)
-            beers = self.select_beers()
-            self.brewery.buy(beers, 1)
-            self.log(self.name + ' waiting to be served')
-            yield self.wait(TIME_TO_BE_SERVED)
-
-        except simpy.Interrupt:
-            self.log('party {} leaving {} hrs early'.format(self.departure - now))
-
-    def select_beers(self):
-        beers = []
-        for customer in range(self.party_size):
-            other_beer = None
-            beer = sample(brewery.beers, 1)
-            name = beer['name']
-            if name not in brewery.kegs or brewery.kegs[name].level < KEGS_PER_PINT:
-                other_beer = sample([key for key, keg in brewery.kegs.items() if keg.level > KEGS_PER_PINT], 1)
-                self.log('customer in party {} could get {} so they ordered {}'.format(self.name, name, new_beer))
-            if other_beer is None:
-                beers.append(beer)
-            else:
-                beers.append(other_beer)
-
-        return beers
 
 
 class Brewery(SimpyMixin):
@@ -101,13 +28,13 @@ class Brewery(SimpyMixin):
                  price_list='prices.csv',
                  initial_funds=10000.0,
                  num_mash_tuns=1,
-                 num_fermenters=1,
                  num_cooper_tanks=1,
-                 max_barley=1000,
-                 max_hops=1000,
+                 num_fermenters=1,
+                 num_conditioners=1,
                  num_bar_kegs=5,
                  num_stored_kegs=10,
                  batch_size=2,
+                 num_kegs_per_beer=2,
                  hours=None, *args, **kwargs):
 
         super(Brewery, self).__init__(*args, **kwargs)
@@ -124,7 +51,8 @@ class Brewery(SimpyMixin):
 
         self.mash_tuns = self.new_resource(capacity=num_mash_tuns)
         self.cooper_tanks = self.new_resource(capacity=num_cooper_tanks)
-        self.fermenters = self.new_store(capacity=num_fermenters)
+        self.fermenters = self.new_resource(capacity=num_fermenters)
+        self.conditioners = self.new_resource(capacity=num_conditioners)
 
         self.dry_storage = {}
         for ingredient in [beer['ingredients'] for beer in self.beers.values()][0]:
@@ -133,12 +61,23 @@ class Brewery(SimpyMixin):
         self.cellar = self.new_store(capacity=num_stored_kegs, kind='filter')
         self.tapped_kegs = self.new_store(capacity=num_bar_kegs, kind='filter')
 
+        if isinstance(num_kegs_per_beer, int):
+            for beer in self.beers:
+                for keg in [k for k in self.cellar.items if k.amount == 0 and k.clean][:num_kegs_per_beer]:
+                    keg.fill(beer)
+        elif isinstance(num_kegs_per_beer, dict):
+            for beer, num_kegs in num_kegs_per_beer.items():
+                for keg in [k for k in self.cellar.items if k.amount == 0 and k.clean][:num_kegs]:
+                    keg.fill(beer)
+
         for _ in range(num_stored_kegs):
             self.cellar.put(Keg())
 
+        self.kegs_ready = []
+
         check_inputs(self.beers, self.prices)
         self.buying_ingredients = self.process(self.buy_ingredients())
-        #self.running_bar = self.process(self.run_bar())
+        self.running_bar = self.process(self.run_bar())
         self.running_brewery = self.process(self.run_brewery())
 
         self.errors = None
@@ -257,10 +196,11 @@ class Brewery(SimpyMixin):
                 yield self.wait(2)
                 continue
 
-            kegs = yield self.process(self.brew_beer(self.beers[beer], kegs))
+            yield self.process(self.brew_beer(self.beers[beer], kegs))
 
-            for keg in kegs[num_kegs:]:
+            for keg in self.kegs_ready:
                 yield self.cellar.put(keg)
+            self.kegs_ready = []
 
     def select_beer_to_brew(self):
         candidates = [beer for beer, recipe in self.beers.items() if all(self.dry_storage[ingredient].level >= recipe['ingredients'][ingredient] * self.batch_size for ingredient in recipe['ingredients'])]
@@ -285,7 +225,7 @@ class Brewery(SimpyMixin):
         quantity = len(kegs)
         ingredients = {}
         for ingredient in beer['ingredients']:
-            ingredients[ingredient] = self.dry_storage[ingredient].get(beer[ingredient] * quantity)
+            ingredients[ingredient] = self.dry_storage[ingredient].get(beer['ingredients'][ingredient] * quantity)
 
         mash_tun = self.mash_tuns.request()
         request = yield mash_tun | self.wait(MAX_START_WAIT)
@@ -303,12 +243,12 @@ class Brewery(SimpyMixin):
         else:
             self.mash_tuns.release(mash_tun)
             self.log("Failed batch of {} ({} kegs) because of timeout for fermenter".format(beer['name'], quantity))
-            yield kegs
+            self.kegs_ready = kegs
 
         self.log("Starting conditioning for beer " + beer['name'])
         conditioner = self.conditioners.request()
         start_conditioning = self.now
-        conditioning_time = uniform(beer['conditioning_time'])
+        conditioning_time = uniform(*beer['conditioning_time'])
         request = yield conditioner | self.wait(conditioning_time)
         if conditioner in request.events:
             self.fermenters.release(fermenter)
@@ -320,14 +260,14 @@ class Brewery(SimpyMixin):
 
         # TODO: find formula for number of kegs made
         num_kegs = self.batch_size
-        yield self.wait(self.time_to_keg * num_kegs)
+        yield self.wait(TIME_TO_KEG * num_kegs)
 
         amount_brewed = 124 * num_kegs
 
         for keg in kegs[:num_kegs]:
             keg.fill(beer['name'])
 
-        yield kegs
+        self.kegs_ready = kegs
 
 '''
 2.      Availability of hops.  This is handled by contract and we have a reasonably good hanld on this at the moment.  However, we'd certainly like to be able to use whatever is developed to project hops for future contracts.

@@ -9,5 +9,7 @@
                                           "Liberty (Whole) [4.00 %]": 0.19375,
                                           "Irish Moss": 0.01,
                                           "California Ale (White Labs #WLP001)": 0.01},
-                          "mash_time": [1.15, 1.35]}
+                          "mash_time": [1.15, 1.35],
+                          "fermentation_time": [78, 84],
+                          "conditioning_time": [150, 180]}
 }

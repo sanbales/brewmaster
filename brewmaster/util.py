@@ -5,12 +5,21 @@ from StringIO import StringIO
 from json import load
 from csv import DictReader
 from random import uniform, expovariate
-import simpy
+from simpy import Environment, Interrupt, Store, FilterStore, Container, Resource, PreemptiveResource, PriorityResource, Event
 
 
 inf = float('inf')
 TIMESTAMP = '[{:10.1f}]'
 MAX_POISSON = 1000
+
+
+def check_inputs(beers, prices):
+    for beer, data in beers.items():
+        if beer not in prices:
+            raise KeyError('Beer {} is not listed in prices'.format(beer))
+        for ingredient in data['ingredients']:
+            if ingredient not in prices:
+                raise KeyError('Ingredient {} for beer {} is not listed in prices'.format(ingredient, beer))
 
 
 def poisson(alpha):
@@ -54,7 +63,7 @@ def to_number(string):
             return string
 
 
-class NotifyingStore(simpy.Store):
+class NotifyingStore(Store):
     """
     A store that calls an optional callback whenever there is a put/get request.
 
@@ -76,7 +85,7 @@ class NotifyingStore(simpy.Store):
             self.callback('get', self, get_event, *args, **kwargs)
 
 
-class SelfMonitoringStore(simpy.Store):
+class SelfMonitoringStore(Store):
     """
     A store that calls an optional callback whenever there is a put/get request.
 
@@ -120,7 +129,7 @@ class SelfMonitoringStore(simpy.Store):
         return result
 
 
-class SelfMonitoringFilterStore(simpy.FilterStore, SelfMonitoringStore):
+class SelfMonitoringFilterStore(FilterStore, SelfMonitoringStore):
     pass
 
 
@@ -137,7 +146,8 @@ class SimpyMixin(object):
     def __init__(self, env=None, strict=False, **kwargs):
         self.env = env
         if self.env is None and not strict:
-            self.env = simpy.Environment()
+            self.env = Environment()
+            self._log = []
             warn("Creating new environment")
         super(SimpyMixin, self).__init__()
 
@@ -198,7 +208,7 @@ class SimpyMixin(object):
         :rtype: :class:`simpy.Container`
 
         """
-        return simpy.Container(self.env, capacity=capacity, init=init)
+        return Container(self.env, capacity=capacity, init=init)
 
     def new_resource(self, capacity=1, kind=None):
         """
@@ -214,11 +224,11 @@ class SimpyMixin(object):
 
         """
         if kind is None:
-            return simpy.Resource(env=self.env, capacity=capacity)
+            return Resource(env=self.env, capacity=capacity)
         elif kind == 'preemptive':
-            return simpy.PreemptiveResource(env=self.env, capacity=capacity)
+            return PreemptiveResource(env=self.env, capacity=capacity)
         elif kind == 'priority':
-            return simpy.PriorityResource(env=self.env, capacity=capacity)
+            return PriorityResource(env=self.env, capacity=capacity)
         else:
             raise ValueError(
                 'A specialized resource can either be `priority` or `preemptive`.')
@@ -233,7 +243,7 @@ class SimpyMixin(object):
         :type capacity: int
         :type kind: str
 
-        :rtype: :class:`simpy.Store`
+        :rtype: :class:`Store`
 
         """
         if monitoring:
@@ -245,11 +255,11 @@ class SimpyMixin(object):
                 return SelfMonitoringFilterStore(env=self.env, capacity=capacity)
         else:
             if kind is None:
-                return simpy.Store(env=self.env, capacity=capacity)
+                return Store(env=self.env, capacity=capacity)
             elif kind == 'priority':
                 return PriorityFilterStore(env=self.env, capacity=capacity)
             elif kind == 'filter':
-                return simpy.FilterStore(env=self.env, capacity=capacity)
+                return FilterStore(env=self.env, capacity=capacity)
             else:
                 raise ValueError('A specialized store can either be `priority` or `filter`.')
 
@@ -260,8 +270,8 @@ class SimpyMixin(object):
         :rtype: :class:`simpy.Event`
 
         """
-        return simpy.Event(self.env)
+        return Event(self.env)
 
     def log(self, msg):
         text = getattr(self, 'timestamp', TIMESTAMP) + " - {}"
-        print(text.format(self.now, msg))
+        self._log.append(text.format(self.now, msg))
