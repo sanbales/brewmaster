@@ -17,10 +17,11 @@ DEFAULT_HOURS = {'Monday': [10, 22],
                  'Sunday': [12, 20]}
 MAX_START_WAIT = 2
 MAX_MASH_WAIT = 6
-AVG_GROUP_ARRIVAL_TIME = 0.5
+AVG_GROUP_ARRIVAL_TIME = 1.5
 TIME_TO_KEG = 0.5
 TIME_TO_DELIVER = [5, 48]
 MAX_AMOUNT_PER_INGREDIENT = 100
+TABLES = {2: 4, 4: 10, 6: 4, 8: 4, 10: 1}
 
 
 class Brewery(SimpyMixin):
@@ -35,6 +36,7 @@ class Brewery(SimpyMixin):
                  num_stored_kegs=10,
                  batch_size=2,
                  num_kegs_per_beer=2,
+                 tables=None,
                  hours=None, *args, **kwargs):
 
         super(Brewery, self).__init__(*args, **kwargs)
@@ -61,6 +63,9 @@ class Brewery(SimpyMixin):
         self.cellar = self.new_store(capacity=num_stored_kegs, kind='filter')
         self.tapped_kegs = self.new_store(capacity=num_bar_kegs, kind='filter')
 
+        self._tables = TABLES if tables is None else tables
+        self.set_tables()
+
         if isinstance(num_kegs_per_beer, int):
             for beer in self.beers:
                 for keg in [k for k in self.cellar.items if k.amount == 0 and k.clean][:num_kegs_per_beer]:
@@ -82,6 +87,11 @@ class Brewery(SimpyMixin):
 
         self.errors = None
 
+    def set_tables(self):
+        self.tables = {}
+        for table_size, quantity in self._tables.items():
+            self.tables[table_size] = self.new_resource(capacity=quantity)
+
     def buy_ingredients(self):
         while True:
             yield self.wait(1)
@@ -99,32 +109,66 @@ class Brewery(SimpyMixin):
         self.register -= self.prices[ingredient] * quantity
 
     def run_bar(self):
-        idx = 0
+        day = 0
         while True:
-            start, end = self.hours[DAYS[idx]]
-            time_till_open = max(0, start - self.now % 24.0)
-            yield self.wait(time_till_open)
-            self.log("Brewery is open")
-            self.serving = self.process(self.serve_customers())
-            time_till_close = max(0, end - self.now % 24.0)
-            yield self.wait(time_till_close)
-            self.serving.interrupt("Brewery is closing")
-            self.log("Brewery is closing")
-            idx = (idx + 1) % 7
+            day_of_the_week = day % 7
+            self.process(self.restock_bar())
+            if self.tapped_kegs.items:
+                start, end = self.hours[DAYS[day_of_the_week]]
+                time_till_open = max(0, start - (self.now % 24.0))
+                yield self.wait(time_till_open)
+                self.log("Brewery is open on a {}".format(DAYS[day_of_the_week]))
+                self.serving = self.process(self.serve_customers())
+                time_till_close = max(0, end - self.now % 24.0)
+                yield self.wait(time_till_close)
+                self.serving.interrupt("Brewery is closing")
+                self.log("Brewery is closing for {}".format(DAYS[day_of_the_week]))
+                self.process(self.set_tables())
+                self.process(self.check_kegs())
+                yield self.wait(24 - (self.now % 24.0))
+            else:
+                self.log("Could not open on {} because no beers were on tap".format(DAYS[day_of_the_week]))
+                yield self.wait(24)
+
+            day += 1
+
+    def restock_bar(self):
+        for _ in range(len(self.tapped_kegs.items) < self.tapped_kegs.capacity):
+            self.log("trying to restock kegs")
+            beers_on_tap = [keg.name for keg in self.tapped_kegs.items]
+            candidate_kegs = [keg for keg in self.cellar.items if keg.name not in beers_on_tap]
+            if candidate_kegs:
+                keg = sample(candidate_kegs, 1)[0]
+                yield self.cellar.get(filter=lambda x: x == keg)
+                yield self.tapped_kegs.put(keg)
+                self.log("Tapped {}".format(keg.name))
+
+    def check_kegs(self):
+        """ Ensure kegs are not expired """
+
+        for keg in self.cellar.items:
+            if keg.expiration > self.now:
+                keg.empty()
+
+        for keg in self.tapped_kegs.items:
+            if keg.expiration > self.now:
+                yield self.tapped_kegs.get(filter=lambda x: x == keg)
+                yield keg.empty()
+                yield self.cellar.put(keg)
 
     def serve_customers(self):
         while True:
             try:
-                self.wait(expovariate(AVG_GROUP_ARRIVAL_TIME))
-                self.patrons.append(Patron(brewery=self))
+                yield self.wait(expovariate(AVG_GROUP_ARRIVAL_TIME))
+                self.patrons.append(Patron(env=self.env, brewery=self))
             except simpy.Interrupt:
-                self.log("Kicking out {} patrons".format(len(self.patrons)))
-                for patron in patrons:
+                self.log("Kicking out {} patrons".format(sum([patron.party_size for patron in self.patrons])))
+                for patron in self.patrons:
                     patron.consuming.interrupt()
                     del patron
                 self.patrons = []
 
-    def order(self, beers, pints):
+    def take_order(self, beers, pints):
         if hasattr(beers, __iter__):
             if isinstance(pints, (int, float)):
                 for beer in beers:
@@ -227,47 +271,53 @@ class Brewery(SimpyMixin):
         for ingredient in beer['ingredients']:
             ingredients[ingredient] = self.dry_storage[ingredient].get(beer['ingredients'][ingredient] * quantity)
 
-        mash_tun = self.mash_tuns.request()
-        request = yield mash_tun | self.wait(MAX_START_WAIT)
-        if mash_tun in request:
-            yield self.wait(beer['mash_time'])
+        try:
+            self.log("Waiting for Mash Tun for {}".format(beer['name']))
+            mash_tun = self.mash_tuns.request()
+            request = yield mash_tun | self.wait(MAX_START_WAIT)
+            if mash_tun in request:
+                yield self.wait(beer['mash_time'])
+            else:
+                raise Interrupt("brewer could not get Mash Tun")
 
-        fermenter = self.fermenters.request()
-        request = yield fermenter | self.wait(MAX_MASH_WAIT)
-        if fermenter in request.events:
-            self.mash_tuns.release(mash_tun)
-            self.log("Released Mash Tun for beer " + beer['name'])
-            self.log("Starting fermentation for beer " + beer['name'])
-            yield self.wait(beer['fermentation_time'])
-            self.log("Finished fermentation for beer " + beer['name'])
-        else:
-            self.mash_tuns.release(mash_tun)
-            self.log("Failed batch of {} ({} kegs) because of timeout for fermenter".format(beer['name'], quantity))
+            fermenter = self.fermenters.request()
+            request = yield fermenter | self.wait(MAX_MASH_WAIT)
+            if fermenter in request.events:
+                self.mash_tuns.release(mash_tun)
+                self.log("Released Mash Tun for beer " + beer['name'])
+                self.log("Starting fermentation for beer " + beer['name'])
+                yield self.wait(beer['fermentation_time'])
+                self.log("Finished fermentation for beer " + beer['name'])
+            else:
+                self.mash_tuns.release(mash_tun)
+                self.log("Failed batch of {} ({} kegs) because of timeout for fermenter".format(beer['name'], quantity))
+                self.kegs_ready = kegs
+
+            self.log("Starting conditioning for beer " + beer['name'])
+            conditioner = self.conditioners.request()
+            start_conditioning = self.now
+            conditioning_time = uniform(*beer['conditioning_time'])
+            request = yield conditioner | self.wait(conditioning_time)
+            if conditioner in request.events:
+                self.fermenters.release(fermenter)
+                self.log("Finished conditioning for beer " + beer['name'])
+                self.wait(conditioning_time - (self.now - start_conditioning))
+            else:
+                self.fermenters.release(fermenter)
+                self.conditioners.release(conditioner)
+
+            # TODO: find formula for number of kegs made
+            num_kegs = self.batch_size
+            yield self.wait(TIME_TO_KEG * num_kegs)
+
+            amount_brewed = 124 * num_kegs
+
+            for keg in kegs[:num_kegs]:
+                keg.fill(beer['name'])
+
             self.kegs_ready = kegs
-
-        self.log("Starting conditioning for beer " + beer['name'])
-        conditioner = self.conditioners.request()
-        start_conditioning = self.now
-        conditioning_time = uniform(*beer['conditioning_time'])
-        request = yield conditioner | self.wait(conditioning_time)
-        if conditioner in request.events:
-            self.fermenters.release(fermenter)
-            self.log("Finished conditioning for beer " + beer['name'])
-            self.wait(conditioning_time - (self.now - start_conditioning))
-        else:
-            self.fermenters.release(fermenter)
-            self.conditioners.release(conditioner)
-
-        # TODO: find formula for number of kegs made
-        num_kegs = self.batch_size
-        yield self.wait(TIME_TO_KEG * num_kegs)
-
-        amount_brewed = 124 * num_kegs
-
-        for keg in kegs[:num_kegs]:
-            keg.fill(beer['name'])
-
-        self.kegs_ready = kegs
+        except Interrupt as interruption:
+            self.log('Failed to brew {} because of {}'.format(beer['name'], interruption))
 
 '''
 2.      Availability of hops.  This is handled by contract and we have a reasonably good hanld on this at the moment.  However, we'd certainly like to be able to use whatever is developed to project hops for future contracts.

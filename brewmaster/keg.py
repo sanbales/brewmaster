@@ -29,3 +29,6 @@ class Keg(SimpyMixin):
         self.name = beer
         self.clean = False
         self.contents.put(amount)
+
+    def empty(self):
+        self.get(self.amount)

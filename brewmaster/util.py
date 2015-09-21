@@ -12,6 +12,8 @@ inf = float('inf')
 TIMESTAMP = '[{:10.1f}]'
 MAX_POISSON = 1000
 
+ENV = Environment()
+
 
 def check_inputs(beers, prices):
     for beer, data in beers.items():
@@ -146,7 +148,7 @@ class SimpyMixin(object):
     def __init__(self, env=None, strict=False, **kwargs):
         self.env = env
         if self.env is None and not strict:
-            self.env = Environment()
+            self.env = ENV
             self._log = []
             warn("Creating new environment")
         super(SimpyMixin, self).__init__()
