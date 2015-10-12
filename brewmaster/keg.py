@@ -1,5 +1,5 @@
 from __future__ import division, print_function
-from util import SimpyMixin
+from .util import SimpyMixin
 
 
 KEGS_PER_PINT = 1 / 124

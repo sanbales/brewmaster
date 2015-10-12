@@ -1,10 +1,11 @@
 from __future__ import division, print_function
 from json import load
 from random import seed, expovariate, normalvariate, sample, uniform
+from six import string_types
 import simpy
-from util import SimpyMixin, poisson, csv_to_dict, json_to_dict, check_inputs
-from patron import Patron
-from keg import Keg
+from .util import SimpyMixin, poisson, csv_to_dict, json_to_dict, check_inputs
+from .patron import Patron
+from .keg import Keg
 
 
 DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -278,7 +279,7 @@ class Brewery(SimpyMixin):
         :type beer: dict
         :type kegs: list
         """
-        if isinstance(beer, basestring):
+        if isinstance(beer, string_types):
             beer = self.beers[beer]
 
         quantity = len(kegs)

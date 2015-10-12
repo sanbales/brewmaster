@@ -1,7 +1,10 @@
 from __future__ import division, print_function
 from warnings import warn
 from traceback import print_exc
-from StringIO import StringIO
+try:
+    from StringIO import StringIO
+except ImportError:
+    from io import StringIO
 from json import load
 from csv import DictReader
 from random import uniform, expovariate

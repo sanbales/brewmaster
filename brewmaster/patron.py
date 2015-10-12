@@ -1,7 +1,7 @@
 from __future__ import division, print_function
 from random import expovariate, sample, uniform
-from util import Interrupt, SimpyMixin, poisson, csv_to_dict, json_to_dict
-from keg import KEGS_PER_PINT
+from .util import Interrupt, SimpyMixin, poisson, csv_to_dict, json_to_dict
+from .keg import KEGS_PER_PINT
 
 
 AVG_GROUP_SIZE = 4
@@ -65,7 +65,7 @@ class Patron(SimpyMixin):
             else:
                 continue
             new_beer = None
-            beer = sample(tapped_kegs, 1)[0]
+            beer = sample(tapped_kegs.keys(), 1)[0]
             self.brewery.log('A customer in {} wants to drink a pint of {}'.format(self.name, beer))
             if beer not in tapped_kegs or tapped_kegs[beer].amount < KEGS_PER_PINT:
                 candidate_kegs = [key for key, keg in tapped_kegs.items() if keg.amount > KEGS_PER_PINT]
