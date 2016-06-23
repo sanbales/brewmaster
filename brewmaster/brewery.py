@@ -2,6 +2,7 @@ from __future__ import division, print_function
 from json import load
 from random import seed, expovariate, normalvariate, sample, uniform
 from six import string_types
+from pandas import read_excel
 import simpy
 from .util import SimpyMixin, poisson, csv_to_dict, json_to_dict, check_inputs
 from .patron import Patron
@@ -16,6 +17,7 @@ DEFAULT_HOURS = {'Monday': [10, 22],
                  'Friday': [10, 24],
                  'Saturday': [9, 24],
                  'Sunday': [12, 20]}
+DAYS_CLOSED = ('Wednesday',)
 MAX_START_WAIT = 2
 MAX_MASH_WAIT = 6
 AVG_GROUP_ARRIVAL_TIME = 1.5
@@ -26,59 +28,28 @@ TABLES = {2: 4, 4: 10, 6: 4, 8: 4, 10: 1}
 
 
 class Brewery(SimpyMixin):
-    def __init__(self, beers_list='beers.json',
-                 price_list='prices.csv',
-                 initial_funds=10000.0,
-                 num_mash_tuns=1,
-                 num_cooper_tanks=1,
-                 num_fermenters=1,
-                 num_conditioners=1,
+    def __init__(self, beer_datasheet='beers.xlsx',
+                 num_brewers=1,
+                 num_fermenters=6,
+                 num_conditioners=6,
                  num_bar_kegs=5,
                  num_stored_kegs=10,
                  batch_size=2,
-                 num_kegs_per_beer=2,
-                 tables=None,
-                 hours=None,
                  random_seed=None, *args, **kwargs):
 
         super(Brewery, self).__init__(*args, **kwargs)
 
         if random_seed is not None:
             seed(random_seed)
+            
+        self._beers_df = read_excel(beers_filename)
 
-        self.register = self.new_container(init=initial_funds)
-        self.beers = {name: beer for name, beer in json_to_dict(beers_list).items()}
-        for beer in self.beers:
-            self.beers[beer].update({'name': beer})
-        self.prices = {item['name']: item['price'] for item in csv_to_dict(price_list)}
-        self.hours = hours if hours is not None else DEFAULT_HOURS
-        self.batch_size = batch_size
-
-        self.patrons = []
-
-        self.mash_tuns = self.new_resource(capacity=num_mash_tuns)
-        self.cooper_tanks = self.new_resource(capacity=num_cooper_tanks)
+        self.brewers = self.new_resource(capacity=num_brewers)
         self.fermenters = self.new_resource(capacity=num_fermenters)
         self.conditioners = self.new_resource(capacity=num_conditioners)
 
-        self.dry_storage = {}
-        for ingredient in [beer['ingredients'] for beer in self.beers.values()][0]:
-            if ingredient not in self.dry_storage:
-                self.dry_storage[ingredient] = self.new_container(init=1000)
         self.cellar = self.new_store(capacity=num_stored_kegs, kind='filter')
         self.tapped_kegs = self.new_store(capacity=num_bar_kegs, kind='filter')
-
-        self._tables = TABLES if tables is None else tables
-        self.set_tables()
-
-        if isinstance(num_kegs_per_beer, int):
-            for beer in self.beers:
-                for keg in [k for k in self.cellar.items if k.amount == 0 and k.clean][:num_kegs_per_beer]:
-                    keg.fill(beer)
-        elif isinstance(num_kegs_per_beer, dict):
-            for beer, num_kegs in num_kegs_per_beer.items():
-                for keg in [k for k in self.cellar.items if k.amount == 0 and k.clean][:num_kegs]:
-                    keg.fill(beer)
 
         for _ in range(num_stored_kegs):
             self.cellar.put(Keg())
@@ -86,54 +57,36 @@ class Brewery(SimpyMixin):
         self.kegs_ready = []
 
         check_inputs(self.beers, self.prices)
-        self.buying_ingredients = self.process(self.buy_ingredients())
         self.running_bar = self.process(self.run_bar())
         self.running_brewery = self.process(self.run_brewery())
 
         self.errors = None
 
-    def set_tables(self):
-        self.tables = {}
-        for table_size, quantity in self._tables.items():
-            self.tables[table_size] = self.new_resource(capacity=quantity)
-
-    def buy_ingredients(self):
-        while True:
-            yield self.wait(1)
-            for ingredient, container in self.dry_storage.items():
-                if container.level == 0:
-                    quantity = MAX_AMOUNT_PER_INGREDIENT / self.prices[ingredient]
-                    self.buy_ingredient(ingredient, quantity)
-
-    def buy_ingredient(self, ingredient, quantity):
-        # Await arrival of ingredient
-        yield self.wait(TIME_TO_DELIVER)
-        # Stock ingredient
-        self.dry_storage[ingredient] += quantity
-        # Pay for ingredient
-        self.register -= self.prices[ingredient] * quantity
-
     def run_bar(self):
         day = 0
         while True:
             day_of_the_week = day % 7
-            self.process(self.restock_bar())
-            if self.tapped_kegs.items:
-                start, end = self.hours[DAYS[day_of_the_week]]
-                time_till_open = max(0, start - (self.now % 24.0))
-                yield self.wait(time_till_open)
-                self.log("Brewery is open on a {}".format(DAYS[day_of_the_week]))
-                self.serving = self.process(self.serve_customers())
-                time_till_close = max(0, end - self.now % 24.0)
-                yield self.wait(time_till_close)
-                self.serving.interrupt("Brewery is closing")
-                self.log("Brewery is closing for {}".format(DAYS[day_of_the_week]))
-                self.set_tables()
-                self.process(self.check_kegs())
-                yield self.wait(24 - (self.now % 24.0))
+            if DAYS[day] in DAYS_CLOSED:
+                self.wait(24)
             else:
-                self.log("Could not open on {} because no beers were on tap".format(DAYS[day_of_the_week]))
-                yield self.wait(24)
+                self.process(self.restock_bar())
+                
+                if self.tapped_kegs.items:
+                    start, end = self.hours[DAYS[day_of_the_week]]
+                    time_till_open = max(0, start - (self.now % 24.0))
+                    yield self.wait(time_till_open)
+                    self.log("Brewery is open on a {}".format(DAYS[day_of_the_week]))
+                    self.serving = self.process(self.serve_customers())
+                    time_till_close = max(0, end - self.now % 24.0)
+                    yield self.wait(time_till_close)
+                    self.serving.interrupt("Brewery is closing")
+                    self.log("Brewery is closing for {}".format(DAYS[day_of_the_week]))
+                    self.set_tables()
+                    self.process(self.check_kegs())
+                    yield self.wait(24 - (self.now % 24.0))
+                else:
+                    self.log("Could not open on {} because no beers were on tap".format(DAYS[day_of_the_week]))
+                    yield self.wait(24)
 
             day += 1
 
@@ -212,26 +165,6 @@ class Brewery(SimpyMixin):
         old_keg.name = None
         yield self.cellar.put(old_keg)
 
-    def pour(self, beer, pints):
-        keg = self.find_keg(beer)
-
-        if keg.contents.level < pints:
-            poured = keg.contents.level
-        else:
-            poured = pints
-
-        if poured:
-            keg.contents.get(poured)
-        else:
-            return poured
-
-        if poured < pints:
-            self.swap_keg(keg)
-            poured += self.pour(beer, pints - poured)
-            if poured < pints:
-                self.log('Failed to sell {} pints of {}'.format(pints - poured, beer))
-        return poured
-
     def sell(self, beer, pints):
         if beer:
             poured = self.pour(beer, pints)
@@ -278,7 +211,9 @@ class Brewery(SimpyMixin):
 
         :type beer: dict
         :type kegs: list
+
         """
+
         if isinstance(beer, string_types):
             beer = self.beers[beer]
 
